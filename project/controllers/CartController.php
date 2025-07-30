@@ -13,6 +13,10 @@ class CartController {
             return ['success' => false, 'message' => 'Vui lòng đăng nhập để thêm sản phẩm vào giỏ hàng!'];
         }
         
+        if ($quantity <= 0) {
+            return ['success' => false, 'message' => 'Số lượng phải lớn hơn 0!'];
+        }
+        
         try {
             // Kiểm tra sản phẩm tồn tại
             $sql = "SELECT * FROM Products WHERE Product_Id = ?";
@@ -32,6 +36,10 @@ class CartController {
             // Tìm hoặc tạo giỏ hàng cho user
             $cartId = $this->getOrCreateCart($_SESSION['user_id']);
             
+            if (!$cartId) {
+                return ['success' => false, 'message' => 'Không thể tạo giỏ hàng!'];
+            }
+            
             // Kiểm tra sản phẩm đã có trong giỏ hàng chưa
             $sql = "SELECT * FROM Cart_detail WHERE Cart_Id = ? AND Product_Id = ?";
             $stmt = $this->conn->prepare($sql);
@@ -49,45 +57,78 @@ class CartController {
                 $stmt = $this->conn->prepare($sql);
                 $stmt->execute([$newQuantity, $existingItem['Cart_Item_Id']]);
             } else {
+                // Tạo Cart_Item_Id mới
+                $cartItemId = $this->generateCartItemId();
+                
                 // Thêm mới vào giỏ hàng
-                $sql = "INSERT INTO Cart_detail (Cart_Id, Product_Id, Quantity) VALUES (?, ?, ?)";
+                $sql = "INSERT INTO Cart_detail (Cart_Item_Id, Cart_Id, Product_Id, Quantity) VALUES (?, ?, ?, ?)";
                 $stmt = $this->conn->prepare($sql);
-                $stmt->execute([$cartId, $productId, $quantity]);
+                $stmt->execute([$cartItemId, $cartId, $productId, $quantity]);
             }
             
             return ['success' => true, 'message' => 'Đã thêm sản phẩm vào giỏ hàng!'];
             
         } catch (PDOException $e) {
+            error_log("Cart Error: " . $e->getMessage());
             return ['success' => false, 'message' => 'Lỗi hệ thống: ' . $e->getMessage()];
         }
     }
     
     // Lấy hoặc tạo giỏ hàng cho user
     private function getOrCreateCart($userId) {
-        // Tìm giỏ hàng hiện tại
-        $sql = "SELECT Cart_Id FROM Cart WHERE User_id = ?";
-        $stmt = $this->conn->prepare($sql);
-        $stmt->execute([$userId]);
-        $cart = $stmt->fetch(PDO::FETCH_ASSOC);
-        
-        if ($cart) {
-            return $cart['Cart_Id'];
+        try {
+            // Tìm giỏ hàng hiện tại
+            $sql = "SELECT Cart_Id FROM Cart WHERE User_id = ?";
+            $stmt = $this->conn->prepare($sql);
+            $stmt->execute([$userId]);
+            $cart = $stmt->fetch(PDO::FETCH_ASSOC);
+            
+            if ($cart) {
+                return $cart['Cart_Id'];
+            }
+            
+            // Tạo Cart_Id mới
+            $cartId = $this->generateCartId();
+            
+            // Tạo giỏ hàng mới
+            $sql = "INSERT INTO Cart (Cart_Id, User_id, Create_at, Update_at) VALUES (?, ?, GETDATE(), GETDATE())";
+            $stmt = $this->conn->prepare($sql);
+            $stmt->execute([$cartId, $userId]);
+            
+            return $cartId;
+            
+        } catch (PDOException $e) {
+            error_log("Error creating cart: " . $e->getMessage());
+            return null;
         }
-        
-        // Tạo giỏ hàng mới (Cart_Id có IDENTITY)
-        $sql = "INSERT INTO Cart (User_id, Create_at, Update_at) VALUES (?, GETDATE(), GETDATE())";
-        $stmt = $this->conn->prepare($sql);
-        $stmt->execute([$userId]);
-        
-        // Lấy Cart_Id vừa tạo
-        $cartId = $this->conn->lastInsertId();
-        return $cartId;
     }
     
-    // Tạo ID giỏ hàng (không cần vì Cart_Id có IDENTITY)
+    // Tạo ID giỏ hàng
     private function generateCartId() {
-        // Không cần generate ID vì Cart_Id có IDENTITY(1,1)
-        return null;
+        try {
+            // Lấy Cart_Id lớn nhất hiện tại
+            $sql = "SELECT ISNULL(MAX(Cart_Id), 0) + 1 as next_id FROM Cart";
+            $stmt = $this->conn->query($sql);
+            $result = $stmt->fetch(PDO::FETCH_ASSOC);
+            return $result['next_id'];
+        } catch (PDOException $e) {
+            error_log("Error generating Cart_Id: " . $e->getMessage());
+            return rand(1000, 9999); // Fallback random ID
+        }
+    }
+    
+    // Tạo Cart_Item_Id
+    private function generateCartItemId() {
+        try {
+            // Lấy Cart_Item_Id lớn nhất hiện tại
+            $sql = "SELECT ISNULL(MAX(Cart_Item_Id), 0) + 1 as next_id FROM Cart_detail";
+            $stmt = $this->conn->query($sql);
+            $result = $stmt->fetch(PDO::FETCH_ASSOC);
+            return $result['next_id'];
+        } catch (PDOException $e) {
+            error_log("Error generating Cart_Item_Id: " . $e->getMessage());
+            return rand(1000, 9999); // Fallback random ID
+        }
     }
     
     // Lấy thông tin giỏ hàng
@@ -97,29 +138,55 @@ class CartController {
         }
         
         try {
-            $sql = "SELECT cd.*, p.Name, p.Price, p.Image, p.Quantity as StockQuantity 
+            // Truy vấn lấy thông tin giỏ hàng với thông tin sản phẩm, brand và category
+            $sql = "SELECT 
+                        cd.Cart_Item_Id,
+                        cd.Cart_Id, 
+                        cd.Product_Id,
+                        cd.Quantity,
+                        p.Name as Product_Name, 
+                        p.Price, 
+                        p.Image, 
+                        p.Description,
+                        p.Quantity as StockQuantity,
+                        b.Brand_Name,
+                        c.Category_Name
                     FROM Cart_detail cd 
                     JOIN Products p ON cd.Product_Id = p.Product_Id 
-                    JOIN Cart c ON cd.Cart_Id = c.Cart_Id 
-                    WHERE c.User_id = ?";
+                    LEFT JOIN Brands b ON p.Brand_Id = b.Brand_Id
+                    LEFT JOIN Categories c ON p.Category_Id = c.Category_Id
+                    JOIN Cart cart ON cd.Cart_Id = cart.Cart_Id 
+                    WHERE cart.User_id = ?
+                    ORDER BY cd.Cart_Item_Id DESC";
+            
             $stmt = $this->conn->prepare($sql);
             $stmt->execute([$_SESSION['user_id']]);
             $items = $stmt->fetchAll(PDO::FETCH_ASSOC);
             
             $total = 0;
+            $totalItems = 0;
+            
             foreach ($items as &$item) {
                 $item['Subtotal'] = $item['Price'] * $item['Quantity'];
                 $total += $item['Subtotal'];
+                $totalItems += $item['Quantity'];
+                
+                // Đảm bảo có image mặc định
+                if (empty($item['Image'])) {
+                    $item['Image'] = 'https://images.unsplash.com/photo-1526170375885-4d8ecf77b99f?w=300&h=300&fit=crop';
+                }
             }
             
             return [
                 'success' => true, 
                 'items' => $items, 
                 'total' => $total,
-                'count' => count($items)
+                'count' => count($items),
+                'totalItems' => $totalItems
             ];
             
         } catch (PDOException $e) {
+            error_log("Get cart error: " . $e->getMessage());
             return ['success' => false, 'message' => 'Lỗi hệ thống: ' . $e->getMessage(), 'items' => []];
         }
     }
@@ -136,7 +203,7 @@ class CartController {
             }
             
             // Kiểm tra quyền sở hữu và số lượng tồn kho
-            $sql = "SELECT cd.*, p.Quantity as StockQuantity 
+            $sql = "SELECT cd.*, p.Quantity as StockQuantity, p.Name as Product_Name
                     FROM Cart_detail cd 
                     JOIN Products p ON cd.Product_Id = p.Product_Id 
                     JOIN Cart c ON cd.Cart_Id = c.Cart_Id 
@@ -150,16 +217,17 @@ class CartController {
             }
             
             if ($quantity > $item['StockQuantity']) {
-                return ['success' => false, 'message' => 'Số lượng vượt quá tồn kho!'];
+                return ['success' => false, 'message' => 'Số lượng vượt quá tồn kho! Còn lại: ' . $item['StockQuantity']];
             }
             
             $sql = "UPDATE Cart_detail SET Quantity = ? WHERE Cart_Item_Id = ?";
             $stmt = $this->conn->prepare($sql);
             $stmt->execute([$quantity, $cartItemId]);
             
-            return ['success' => true, 'message' => 'Đã cập nhật số lượng!'];
+            return ['success' => true, 'message' => 'Đã cập nhật số lượng sản phẩm "' . $item['Product_Name'] . '"!'];
             
         } catch (PDOException $e) {
+            error_log("Update quantity error: " . $e->getMessage());
             return ['success' => false, 'message' => 'Lỗi hệ thống: ' . $e->getMessage()];
         }
     }
@@ -171,9 +239,10 @@ class CartController {
         }
         
         try {
-            // Kiểm tra quyền sở hữu
-            $sql = "SELECT cd.Cart_Item_Id 
+            // Kiểm tra quyền sở hữu và lấy tên sản phẩm
+            $sql = "SELECT cd.Cart_Item_Id, p.Name as Product_Name
                     FROM Cart_detail cd 
+                    JOIN Products p ON cd.Product_Id = p.Product_Id 
                     JOIN Cart c ON cd.Cart_Id = c.Cart_Id 
                     WHERE cd.Cart_Item_Id = ? AND c.User_id = ?";
             $stmt = $this->conn->prepare($sql);
@@ -188,9 +257,10 @@ class CartController {
             $stmt = $this->conn->prepare($sql);
             $stmt->execute([$cartItemId]);
             
-            return ['success' => true, 'message' => 'Đã xóa sản phẩm khỏi giỏ hàng!'];
+            return ['success' => true, 'message' => 'Đã xóa sản phẩm "' . $item['Product_Name'] . '" khỏi giỏ hàng!'];
             
         } catch (PDOException $e) {
+            error_log("Remove from cart error: " . $e->getMessage());
             return ['success' => false, 'message' => 'Lỗi hệ thống: ' . $e->getMessage()];
         }
     }
@@ -201,11 +271,25 @@ class CartController {
             return ['success' => false, 'message' => 'Vui lòng đăng nhập!'];
         }
         
+        if (empty($shippingAddress) || empty($phone)) {
+            return ['success' => false, 'message' => 'Vui lòng nhập đầy đủ thông tin giao hàng!'];
+        }
+        
         try {
             $cartData = $this->getCart();
             if (!$cartData['success'] || empty($cartData['items'])) {
                 return ['success' => false, 'message' => 'Giỏ hàng trống!'];
             }
+            
+            // Kiểm tra tồn kho trước khi đặt hàng
+            foreach ($cartData['items'] as $item) {
+                if ($item['Quantity'] > $item['StockQuantity']) {
+                    return ['success' => false, 'message' => 'Sản phẩm "' . $item['Product_Name'] . '" không đủ số lượng trong kho!'];
+                }
+            }
+            
+            // Bắt đầu transaction
+            $this->conn->beginTransaction();
             
             // Tạo đơn hàng
             $orderId = $this->generateOrderId();
@@ -235,23 +319,30 @@ class CartController {
             $stmt = $this->conn->prepare($sql);
             $stmt->execute([$_SESSION['user_id']]);
             
-            return ['success' => true, 'message' => 'Đặt hàng thành công! Mã đơn hàng: ' . $orderId];
+            // Commit transaction
+            $this->conn->commit();
+            
+            return ['success' => true, 'message' => 'Đặt hàng thành công! Mã đơn hàng: ' . $orderId, 'order_id' => $orderId];
             
         } catch (PDOException $e) {
+            // Rollback transaction
+            $this->conn->rollback();
+            error_log("Checkout error: " . $e->getMessage());
             return ['success' => false, 'message' => 'Lỗi hệ thống: ' . $e->getMessage()];
         }
     }
     
     // Tạo ID đơn hàng
     private function generateOrderId() {
-        $sql = "SELECT TOP 1 Order_Id FROM Orders ORDER BY Order_Id DESC";
-        $stmt = $this->conn->query($sql);
-        $lastId = $stmt->fetchColumn();
-        
-        if ($lastId) {
-            return $lastId + 1;
+        try {
+            $sql = "SELECT ISNULL(MAX(Order_Id), 0) + 1 as next_id FROM Orders";
+            $stmt = $this->conn->query($sql);
+            $result = $stmt->fetch(PDO::FETCH_ASSOC);
+            return $result['next_id'];
+        } catch (PDOException $e) {
+            error_log("Error generating Order_Id: " . $e->getMessage());
+            return rand(10000, 99999); // Fallback random ID
         }
-        return 1;
     }
     
     // Lấy số lượng sản phẩm trong giỏ hàng (cho header)
@@ -268,12 +359,14 @@ class CartController {
             $stmt->execute([$_SESSION['user_id']]);
             return $stmt->fetchColumn();
         } catch (PDOException $e) {
+            error_log("Get cart count error: " . $e->getMessage());
             return 0;
         }
     }
     
     public function render() {
         $message = '';
+        $messageType = 'info';
         $cartData = ['items' => [], 'total' => 0, 'count' => 0];
         
         // Xử lý các action
@@ -285,6 +378,7 @@ class CartController {
                             $quantity = isset($_POST['quantity']) ? (int)$_POST['quantity'] : 1;
                             $result = $this->addToCart($_POST['product_id'], $quantity);
                             $message = $result['message'];
+                            $messageType = $result['success'] ? 'success' : 'error';
                         }
                         break;
                         
@@ -292,6 +386,7 @@ class CartController {
                         if (isset($_POST['cart_item_id']) && isset($_POST['quantity'])) {
                             $result = $this->updateQuantity($_POST['cart_item_id'], (int)$_POST['quantity']);
                             $message = $result['message'];
+                            $messageType = $result['success'] ? 'success' : 'error';
                         }
                         break;
                         
@@ -299,18 +394,17 @@ class CartController {
                         if (isset($_POST['cart_item_id'])) {
                             $result = $this->removeFromCart($_POST['cart_item_id']);
                             $message = $result['message'];
+                            $messageType = $result['success'] ? 'success' : 'error';
                         }
                         break;
                         
-                                            case 'checkout':
+                    case 'checkout':
                         if (isset($_POST['shipping_address']) && isset($_POST['phone'])) {
                             $result = $this->checkout($_POST['shipping_address'], $_POST['phone']);
                             $message = $result['message'];
+                            $messageType = $result['success'] ? 'success' : 'error';
                             if ($result['success']) {
-                                // Lấy order ID từ message
-                                preg_match('/Mã đơn hàng: (\d+)/', $result['message'], $matches);
-                                $orderId = $matches[1] ?? '';
-                                header('Location: ?page=success&order_id=' . $orderId);
+                                header('Location: ?page=success&order_id=' . $result['order_id']);
                                 exit;
                             }
                         }
@@ -321,6 +415,10 @@ class CartController {
         
         // Lấy thông tin giỏ hàng
         $cartData = $this->getCart();
+        if (!$cartData['success'] && empty($message)) {
+            $message = $cartData['message'];
+            $messageType = 'error';
+        }
         
         include './views/cart.php';
     }

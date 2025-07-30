@@ -22,7 +22,7 @@ class AjaxController {
         
         if (!isset($_SESSION['user_id'])) {
             error_log("AJAX Cart Error - User not logged in");
-            echo json_encode(['success' => false, 'message' => 'Vui lòng đăng nhập!']);
+            echo json_encode(['success' => false, 'message' => 'Vui lòng đăng nhập để thêm sản phẩm vào giỏ hàng!']);
             return;
         }
         
@@ -40,6 +40,11 @@ class AjaxController {
         if (empty($productId)) {
             error_log("AJAX Cart Error - Empty product ID");
             echo json_encode(['success' => false, 'message' => 'Thiếu thông tin sản phẩm!']);
+            return;
+        }
+        
+        if ($quantity <= 0) {
+            echo json_encode(['success' => false, 'message' => 'Số lượng phải lớn hơn 0!']);
             return;
         }
         
@@ -69,6 +74,11 @@ class AjaxController {
             $cartId = $this->getOrCreateCart($_SESSION['user_id']);
             error_log("AJAX Cart Debug - Cart ID: $cartId");
             
+            if (!$cartId) {
+                echo json_encode(['success' => false, 'message' => 'Không thể tạo giỏ hàng!']);
+                return;
+            }
+            
             // Kiểm tra sản phẩm đã có trong giỏ hàng chưa
             $sql = "SELECT * FROM Cart_detail WHERE Cart_Id = ? AND Product_Id = ?";
             $stmt = $this->conn->prepare($sql);
@@ -89,11 +99,14 @@ class AjaxController {
                 $stmt->execute([$newQuantity, $existingItem['Cart_Item_Id']]);
                 error_log("AJAX Cart Debug - Updated quantity to: $newQuantity");
             } else {
+                // Tạo Cart_Item_Id mới
+                $cartItemId = $this->generateCartItemId();
+                
                 // Thêm mới vào giỏ hàng
-                $sql = "INSERT INTO Cart_detail (Cart_Id, Product_Id, Quantity) VALUES (?, ?, ?)";
+                $sql = "INSERT INTO Cart_detail (Cart_Item_Id, Cart_Id, Product_Id, Quantity) VALUES (?, ?, ?, ?)";
                 $stmt = $this->conn->prepare($sql);
-                $stmt->execute([$cartId, $productId, $quantity]);
-                error_log("AJAX Cart Debug - Added new item to cart");
+                $stmt->execute([$cartItemId, $cartId, $productId, $quantity]);
+                error_log("AJAX Cart Debug - Added new item to cart with ID: $cartItemId");
             }
             
             // Lấy số lượng sản phẩm trong giỏ hàng
@@ -117,32 +130,61 @@ class AjaxController {
     
     // Lấy hoặc tạo giỏ hàng cho user
     private function getOrCreateCart($userId) {
-        // Tìm giỏ hàng hiện tại
-        $sql = "SELECT Cart_Id FROM Cart WHERE User_id = ?";
-        $stmt = $this->conn->prepare($sql);
-        $stmt->execute([$userId]);
-        $cart = $stmt->fetch(PDO::FETCH_ASSOC);
-        
-        if ($cart) {
-            error_log("AJAX Cart Debug - Found existing cart: " . $cart['Cart_Id']);
-            return $cart['Cart_Id'];
+        try {
+            // Tìm giỏ hàng hiện tại
+            $sql = "SELECT Cart_Id FROM Cart WHERE User_id = ?";
+            $stmt = $this->conn->prepare($sql);
+            $stmt->execute([$userId]);
+            $cart = $stmt->fetch(PDO::FETCH_ASSOC);
+            
+            if ($cart) {
+                error_log("AJAX Cart Debug - Found existing cart: " . $cart['Cart_Id']);
+                return $cart['Cart_Id'];
+            }
+            
+            // Tạo Cart_Id mới
+            $cartId = $this->generateCartId();
+            
+            // Tạo giỏ hàng mới
+            $sql = "INSERT INTO Cart (Cart_Id, User_id, Create_at, Update_at) VALUES (?, ?, GETDATE(), GETDATE())";
+            $stmt = $this->conn->prepare($sql);
+            $stmt->execute([$cartId, $userId]);
+            
+            error_log("AJAX Cart Debug - Created new cart: $cartId");
+            return $cartId;
+            
+        } catch (PDOException $e) {
+            error_log("AJAX Cart Error creating cart: " . $e->getMessage());
+            return null;
         }
-        
-        // Tạo giỏ hàng mới (Cart_Id có IDENTITY)
-        $sql = "INSERT INTO Cart (User_id, Create_at, Update_at) VALUES (?, GETDATE(), GETDATE())";
-        $stmt = $this->conn->prepare($sql);
-        $stmt->execute([$userId]);
-        
-        // Lấy Cart_Id vừa tạo
-        $cartId = $this->conn->lastInsertId();
-        error_log("AJAX Cart Debug - Created new cart: $cartId");
-        return $cartId;
     }
     
-    // Tạo ID giỏ hàng (không cần vì Cart_Id có IDENTITY)
+    // Tạo ID giỏ hàng
     private function generateCartId() {
-        // Không cần generate ID vì Cart_Id có IDENTITY(1,1)
-        return null;
+        try {
+            // Lấy Cart_Id lớn nhất hiện tại
+            $sql = "SELECT ISNULL(MAX(Cart_Id), 0) + 1 as next_id FROM Cart";
+            $stmt = $this->conn->query($sql);
+            $result = $stmt->fetch(PDO::FETCH_ASSOC);
+            return $result['next_id'];
+        } catch (PDOException $e) {
+            error_log("Error generating Cart_Id: " . $e->getMessage());
+            return rand(1000, 9999); // Fallback random ID
+        }
+    }
+    
+    // Tạo Cart_Item_Id
+    private function generateCartItemId() {
+        try {
+            // Lấy Cart_Item_Id lớn nhất hiện tại
+            $sql = "SELECT ISNULL(MAX(Cart_Item_Id), 0) + 1 as next_id FROM Cart_detail";
+            $stmt = $this->conn->query($sql);
+            $result = $stmt->fetch(PDO::FETCH_ASSOC);
+            return $result['next_id'];
+        } catch (PDOException $e) {
+            error_log("Error generating Cart_Item_Id: " . $e->getMessage());
+            return rand(1000, 9999); // Fallback random ID
+        }
     }
     
     // Lấy số lượng sản phẩm trong giỏ hàng
@@ -160,6 +202,28 @@ class AjaxController {
         }
     }
     
+    // Lấy thông tin giỏ hàng qua AJAX
+    public function getCartInfo() {
+        // Đảm bảo session được start
+        if (session_status() === PHP_SESSION_NONE) {
+            session_start();
+        }
+        
+        header('Content-Type: application/json');
+        
+        if (!isset($_SESSION['user_id'])) {
+            echo json_encode(['success' => false, 'message' => 'Vui lòng đăng nhập!']);
+            return;
+        }
+        
+        try {
+            $cartCount = $this->getCartCount($_SESSION['user_id']);
+            echo json_encode(['success' => true, 'count' => $cartCount]);
+        } catch (Exception $e) {
+            echo json_encode(['success' => false, 'message' => 'Lỗi hệ thống!']);
+        }
+    }
+    
     // Cập nhật số lượng giỏ hàng trong header
     public function updateCartCount() {
         // Đảm bảo session được start
@@ -170,20 +234,23 @@ class AjaxController {
         header('Content-Type: application/json');
         
         if (!isset($_SESSION['user_id'])) {
-            echo json_encode(['cartCount' => 0]);
+            echo json_encode(['success' => false, 'count' => 0]);
             return;
         }
         
         $cartCount = $this->getCartCount($_SESSION['user_id']);
-        echo json_encode(['cartCount' => $cartCount]);
+        echo json_encode(['success' => true, 'count' => $cartCount]);
     }
     
     public function render() {
-        $action = $_GET['action'] ?? '';
+        $action = $_POST['action'] ?? $_GET['action'] ?? '';
         
         switch ($action) {
             case 'add_to_cart':
                 $this->addToCart();
+                break;
+            case 'get_cart_count':
+                $this->getCartInfo();
                 break;
             case 'update_cart_count':
                 $this->updateCartCount();
