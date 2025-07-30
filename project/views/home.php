@@ -298,6 +298,12 @@ function updateCartCount() {
             const cartCountElement = document.querySelector('.cart-count');
             if (cartCountElement) {
                 cartCountElement.textContent = data.count;
+                
+                // Update all cart count displays
+                const allCartCounts = document.querySelectorAll('.cart-count, [data-cart-count]');
+                allCartCounts.forEach(element => {
+                    element.textContent = data.count;
+                });
             }
         }
     })
